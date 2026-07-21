@@ -4,10 +4,10 @@ FYP-26-S2-14 — **Gaming with Bare Hands (TaoSL)**
 
 This repo trains and deploys **two separate YOLO11s image-classification models**:
 
-| Hand | Role | Classes | Deploy artifact |
-|------|------|---------|-----------------|
-| **Left** | Movement / dash | 9 | `left_gesture_model.onnx` |
-| **Right** | Mudra / skill | 8 | `right_gesture_model.onnx` |
+| Hand | Role | Classes | Deploy artifact (FP32) | Faster CPU (INT8) |
+|------|------|---------|------------------------|-------------------|
+| **Left** | Movement / dash | 9 | `left_gesture_model.onnx` | `left_gesture_model_int8.onnx` |
+| **Right** | Mudra / skill | 8 | `right_gesture_model.onnx` | `right_gesture_model_int8.onnx` |
 
 **Pipeline overview**
 
@@ -20,6 +20,8 @@ Webcam frame
 
 Training is done on **Kaggle GPU** via `gesture_training_export.ipynb`. Live inference runs **locally on CPU** with `onnxruntime` (no PyTorch required at runtime).
 
+For FP32 vs INT8 size / accuracy / latency numbers, see **[QUANTIZATION_REPORT.md](QUANTIZATION_REPORT.md)**.
+
 ---
 
 ## What each folder / file is for
@@ -27,12 +29,15 @@ Training is done on **Kaggle GPU** via `gesture_training_export.ipynb`. Live inf
 ```
 Manoj FYP ML version/
 ├── README.md                          ← this file
+├── QUANTIZATION_REPORT.md             ← FP32 vs INT8 latency/accuracy report
 ├── gesture_training_export.ipynb      ← train + val + ONNX export (Kaggle)
 ├── two_hand_id_datasets.zip           ← cropped hand-image datasets (train/val)
 ├── gesture_models_export.zip          ← local zip of exports (gitignored if >100MB)
 └── gesture_models_export/             ← production-ready models + demos
-    ├── left_gesture_model.onnx        ← left classifier (Unity / demo)
-    ├── right_gesture_model.onnx       ← right classifier (Unity / demo)
+    ├── left_gesture_model.onnx        ← left classifier FP32 (Unity / demo)
+    ├── right_gesture_model.onnx       ← right classifier FP32
+    ├── left_gesture_model_int8.onnx   ← left classifier INT8 (faster CPU)
+    ├── right_gesture_model_int8.onnx  ← right classifier INT8
     ├── left_class_names.json          ← ONNX output index → class name
     ├── right_class_names.json
     ├── left_train/                    ← Ultralytics training run (plots, weights, metrics)
@@ -43,6 +48,7 @@ Manoj FYP ML version/
     ├── two_hand_realtime_demo_onnx.py           ← live demo (ONNX + MediaPipe)
     ├── two_hand_realtime_demo_onnx_threaded.py  ← same + threaded camera capture
     ├── two_hand_realtime_demo_profiled.py       ← Ultralytics/.pt profiled demo
+    ├── quantize_onnx_int8.py          ← FP32 → INT8 static quantization + eval
     ├── benchmark_onnx_latency.py      ← pure inference latency benchmark
     ├── check_camera_fps.py            ← measure webcam FPS
     ├── inference.py                   ← shared helpers (e.g. square crop)
@@ -73,13 +79,14 @@ conda activate gesture
 ### 2. Install runtime dependencies (live demo + latency)
 
 ```powershell
-pip install ultralytics onnxruntime opencv-python mediapipe numpy pillow
+pip install ultralytics onnxruntime opencv-python mediapipe numpy pillow onnx
 ```
 
 Notes:
 
 - **Live ONNX demo** needs: `onnxruntime`, `opencv-python`, `mediapipe`, `numpy`
 - **Retrain / export locally** also needs: `ultralytics`, `onnx`, `onnxslim`
+- **INT8 quantization** needs: `onnx` + `onnxruntime` (uses `onnxruntime.quantization`)
 - Prefer MediaPipe builds that expose `mediapipe.solutions` (classic API used by the demos)
 
 ### 3. Confirm ONNX models load
@@ -266,13 +273,71 @@ gesture_array = [left_id, right_id]
 
 ### Latency reference (CPU `onnxruntime`, measured on this machine)
 
+**FP32** (original export):
+
 | Model | Pure `session.run` | Preprocess + infer |
 |-------|--------------------|--------------------|
-| Left | ~8.1 ms | ~8.5 ms |
-| Right | ~8.3 ms | ~8.5 ms |
-| Both same frame | — | ~17 ms |
+| Left | ~8–14 ms | ~8.5 ms+ |
+| Right | ~8–10 ms | ~8.5 ms+ |
+| Both same frame | — | ~17–24 ms |
+
+**INT8** (after `quantize_onnx_int8.py`, same machine):
+
+| Model | Size | Top-1 (val sample) | Mean infer | Speedup vs FP32 |
+|-------|------|--------------------|------------|-----------------|
+| Left INT8 | 20.8 → **5.5 MB** | 100% → **99.4%** | **~8.2 ms** | **~1.7×** |
+| Right INT8 | 20.8 → **5.5 MB** | 99.4% → **99.4%** | **~6.6 ms** | **~1.5×** |
 
 With `--every 4`, average classify cost per display frame is much lower.
+
+---
+
+## INT8 quantization (reduce CPU latency)
+
+Full write-up of method + measured results: **[QUANTIZATION_REPORT.md](QUANTIZATION_REPORT.md)**.
+
+INT8 quantization does **not** change the ONNX opset/version. It converts most weights/activations from FP32 to 8-bit integers so CPU inference is faster and files are smaller. Accuracy is checked against a val sample after conversion.
+
+### Rationale
+
+```
+Train (.pt FP32)
+  → Export ONNX (FP32)              ← left/right_gesture_model.onnx
+  → Static INT8 quantize (calibrate on hand crops)
+  → Deploy INT8 ONNX                ← *_gesture_model_int8.onnx
+```
+
+### Run quantization
+
+Requires `two_hand_id_datasets.zip` next to `gesture_models_export/` (used as calibration + eval crops).
+
+```powershell
+cd gesture_models_export
+conda activate gesture
+pip install onnx   # if needed
+
+python quantize_onnx_int8.py
+# optional knobs:
+python quantize_onnx_int8.py --calib-per-class 8 --eval-per-class 20 --calib-method minmax
+```
+
+Outputs:
+
+- `left_gesture_model_int8.onnx`
+- `right_gesture_model_int8.onnx`
+- Printed FP32 vs INT8: file size, top-1 accuracy, FP32↔INT8 agreement, latency speedup
+
+### Live demo with INT8
+
+```powershell
+python two_hand_realtime_demo_onnx_threaded.py --mirror --crop-margin 0.25 --cls-conf 0.25 `
+  --left-onnx left_gesture_model_int8.onnx `
+  --right-onnx right_gesture_model_int8.onnx
+```
+
+Same `*_class_names.json` files — class indices do not change.
+
+> **Unity note:** Confirm Sentis/your runtime supports the quantized QDQ graph. If Unity import fails, keep shipping FP32 ONNX to Unity and use INT8 only for the Python laptop demo.
 
 ---
 
@@ -287,7 +352,10 @@ With `--every 4`, average classify cost per display frame is much lower.
 | Left/Right swapped | Mirror + MediaPipe handedness | Add `--swap-handedness` and/or toggle `--mirror` |
 | Labels flicker | Borderline confidence / motion blur | Raise `--cls-conf`; increase `--crop-margin`; keep temporal majority vote (already in demo) |
 | Low FPS | MediaPipe + classify every frame | Use threaded demo; raise `--every` / `--detect-every` |
-| ONNX slow on CPU | FP32 YOLO11s | Consider YOLO11n retrain, GPU ORT, or INT8 quantization (same architecture, lower precision — **not** a different ONNX opset “version”) |
+| ONNX slow on CPU | FP32 YOLO11s | Run `python quantize_onnx_int8.py` and load `*_int8.onnx`; or retrain YOLO11n / use GPU ORT |
+| `No module named 'onnx'` during quant | Missing package | `pip install onnx` in the `gesture` env |
+| INT8 accuracy drop too large | Bad/too-few calib crops | Raise `--calib-per-class`; try `--calib-method entropy`; keep FP32 if drop is unacceptable |
+| Unity cannot load INT8 | Runtime lacks QDQ INT8 support | Ship FP32 `.onnx` to Unity; use INT8 for local CPU demo only |
 | Unity class mismatch | JSON index ≠ game ID for right hand | Use name→ID maps in the demo (or the tables below), don’t assume ONNX index == game ID for Mudras |
 | Git push rejected (>100MB) | `gesture_models_export.zip` | Already gitignored; push unpacked `gesture_models_export/` instead |
 
@@ -372,6 +440,7 @@ ONNX softmax order (for debugging model outputs directly):
 1. ✅ Set up `gesture` conda env  
 2. ✅ Unzip / verify `left_gesture_model.onnx` + `right_gesture_model.onnx`  
 3. ✅ `python benchmark_onnx_latency.py`  
-4. ✅ `python two_hand_realtime_demo_onnx_threaded.py --mirror`  
-5. ✅ Confirm `gesture_array` IDs match Unity expectations  
-6. ✅ Hand `.onnx` + `*_class_names.json` (and this ID table) to the Unity teammate  
+4. ✅ `python quantize_onnx_int8.py` (optional INT8 for faster CPU)  
+5. ✅ `python two_hand_realtime_demo_onnx_threaded.py --mirror --left-onnx left_gesture_model_int8.onnx --right-onnx right_gesture_model_int8.onnx`  
+6. ✅ Confirm `gesture_array` IDs match Unity expectations  
+7. ✅ Hand `.onnx` + `*_class_names.json` (and this ID table) to the Unity teammate  

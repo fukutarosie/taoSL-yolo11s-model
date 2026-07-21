@@ -1,0 +1,31 @@
+{
+  "results": [
+    {
+      "label": "LEFT",
+      "fp32_path": "left_gesture_model.onnx",
+      "int8_path": "left_gesture_model_int8.onnx",
+      "fp32_mb": 20.82,
+      "int8_mb": 5.49,
+      "top1_fp32": 1.0,
+      "top1_int8": 0.9944,
+      "agreement": 0.9944,
+      "latency_fp32_mean_ms": 13.957,
+      "latency_int8_mean_ms": 8.175,
+      "speedup": 1.71
+    },
+    {
+      "label": "RIGHT",
+      "fp32_path": "right_gesture_model.onnx",
+      "int8_path": "right_gesture_model_int8.onnx",
+      "fp32_mb": 20.81,
+      "int8_mb": 5.49,
+      "top1_fp32": 0.9938,
+      "top1_int8": 0.9938,
+      "agreement": 1.0,
+      "latency_fp32_mean_ms": 9.637,
+      "latency_int8_mean_ms": 6.586,
+      "speedup": 1.46
+    }
+  ],
+  "notes": "Measured 21 Jul 2026 on local CPU via quantize_onnx_int8.py (calib 8/class, eval 20/class, MinMax)."
+}
